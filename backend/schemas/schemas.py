@@ -46,6 +46,13 @@ class PaymentRequest(BaseModel):
     amount: float = Field(gt=0)
 
 
+class RazorpayVerificationRequest(BaseModel):
+    booking_id: int
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
 class TrainOut(BaseModel):
     id: int
     train_name: str

@@ -58,8 +58,8 @@ def generate_ticket_pdf(db: Session, booking_id: int) -> str:
         ("Transaction No", f": {booking.payment.transaction_id if booking.payment else 'N/A'}"),
         ("Transaction Date", f": {transaction_date}"),
         ("Bank Ref No", f": {booking.payment.transaction_id if booking.payment else 'N/A'}"),
-        ("Reciept No", f": {receipt_no}"),
-        ("Amount", f": ₹ {booking.total_fare}"),
+        ("Receipt No", f": {receipt_no}"),
+        ("Amount", f": Rs. {booking.total_fare}"),
         ("Status", ": Paid")
     ]
 

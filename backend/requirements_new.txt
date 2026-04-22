@@ -1,0 +1,4 @@
+openai>=1.0
+mcp
+python-dotenv
+httpx

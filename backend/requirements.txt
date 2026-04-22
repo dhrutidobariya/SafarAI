@@ -9,3 +9,6 @@ openai
 python-dotenv
 reportlab
 email-validator
+mcp
+mysql-connector-python
+requests

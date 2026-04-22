@@ -40,7 +40,8 @@ export default function HistoryPage() {
       });
       if (!response.ok) throw new Error("Failed to download receipt");
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
+      const pdfBlob = new Blob([blob], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(pdfBlob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `receipt_${bookingId}.pdf`;

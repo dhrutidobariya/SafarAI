@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useChat } from "../src/ChatContext";
-import { sendMessage } from "../services/chatService";
+import { sendMessage, verifyPayment } from "../services/chatService";
 import {
   Mic,
   SendHorizonal,
@@ -9,6 +9,50 @@ import {
 } from "lucide-react";
 
 export default function ChatWindow() {
+  const handleRazorpayCheckout = (order, bookingId) => {
+    const options = {
+      key: order.key,
+      amount: order.amount * 100,
+      currency: order.currency,
+      name: "SafarAI",
+      description: `Payment for Booking #${bookingId}`,
+      order_id: order.order_id,
+      handler: async function (response) {
+        setLoading(true);
+        try {
+          const verifyData = {
+            booking_id: bookingId,
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature
+          };
+          const verification = await verifyPayment(verifyData);
+          if (verification.status === "SUCCESS") {
+            setMessages((prev) => [...prev, { 
+              role: "assistant", 
+              text: `Payment successful! ✅\nTransaction ID: ${response.razorpay_payment_id}\nBooking #${bookingId} is now CONFIRMED.`,
+              bookingId 
+            }]);
+            // Send a ghost message to reset bot state if needed, or just let user know
+          }
+        } catch (err) {
+          console.error(err);
+          setMessages((prev) => [...prev, { role: "assistant", text: "Payment verification failed. Please contact support." }]);
+        } finally {
+          setLoading(false);
+        }
+      },
+      prefill: {
+        name: localStorage.getItem("name") || "Passenger",
+        email: localStorage.getItem("email") || "passenger@example.com",
+      },
+      theme: { color: "#2563eb" },
+    };
+
+    const rzp = new window.Razorpay(options);
+    rzp.open();
+  };
+
   const { messages, setMessages, chatStarted, setChatStarted } = useChat();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -32,9 +76,13 @@ export default function ChatWindow() {
     setLoading(true);
     try {
       const res = await sendMessage(textToSend);
-      let botMessage = res.reply;
+      let botMessage = res.reply || res.response;
       let bookingId = res.booking_id || null;
       setMessages((prev) => [...prev, { role: "assistant", text: botMessage, bookingId }]);
+
+      if (res.razorpay_order) {
+        handleRazorpayCheckout(res.razorpay_order, res.booking_id);
+      }
     } catch (err) {
       const detail = err?.response?.data?.detail || "Something went wrong.";
       const errorMsg = `Error: ${detail}`;
