@@ -53,6 +53,15 @@ export default function ChatWindow() {
     setMessages((prev) => [...prev, { role: "assistant", ...message }]);
   };
 
+  const appendAssistantReplyFromApi = (response, fallbackText) => {
+    appendAssistantMessage({
+      text: response?.reply || response?.response || fallbackText,
+      bookingId: response?.booking_id || null,
+      bookingData: response?.booking || null,
+      paymentStatus: response?.payment_status || null,
+    });
+  };
+
   const handleReceiptDownload = async (bookingId) => {
     try {
       const blob = await downloadReceipt(bookingId);
@@ -87,15 +96,28 @@ export default function ChatWindow() {
     }
   };
 
+  const handlePaymentCancellation = async (fallbackText) => {
+    setLoading(true);
+    try {
+      const response = await sendMessage("no");
+      appendAssistantReplyFromApi(response, fallbackText);
+    } catch (err) {
+      console.error(err);
+      appendAssistantMessage({
+        text: fallbackText,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleDemoPayment = async (order, bookingId) => {
     const proceed = window.confirm(
       `${order.message || "Demo payment mode is active."}\n\nPress OK to simulate a successful payment.`
     );
 
     if (!proceed) {
-      appendAssistantMessage({
-        text: "Demo payment was cancelled before completion.",
-      });
+      await handlePaymentCancellation("Demo payment was cancelled before completion.");
       return;
     }
 
@@ -162,10 +184,8 @@ export default function ChatWindow() {
         email: localStorage.getItem("email") || "passenger@example.com",
       },
       modal: {
-        ondismiss: () => {
-          appendAssistantMessage({
-            text: "Payment was cancelled before completion.",
-          });
+        ondismiss: async () => {
+          await handlePaymentCancellation("Payment was cancelled before completion.");
         },
       },
       theme: { color: "#2563eb" },
@@ -204,14 +224,7 @@ export default function ChatWindow() {
 
     try {
       const res = await sendMessage(textToSend);
-      const assistantMessage = {
-        role: "assistant",
-        text: res.reply || res.response || "No response received.",
-        bookingId: res.booking_id || null,
-        bookingData: res.booking || null,
-        paymentStatus: res.payment_status || null,
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
+      appendAssistantReplyFromApi(res, "No response received.");
 
       if (res.razorpay_order && res.booking_id) {
         handleRazorpayCheckout(res.razorpay_order, res.booking_id);

@@ -1,10 +1,11 @@
 import os
+import re
 from datetime import date, datetime
 from typing import Any, Iterable, Optional
 
 import requests
 
-from services.station_matching import normalize_station_name, resolve_station_candidates, station_match_score, text_match_score
+from services.station_matching import normalize_station_name, station_match_score, text_match_score
 
 
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
@@ -51,6 +52,78 @@ def _safe_string(value: Any) -> Optional[str]:
 
     text = str(value).strip()
     return text or None
+
+
+def _extract_station_value(value: Any) -> tuple[Optional[str], Optional[str]]:
+    if value is None:
+        return None, None
+
+    if isinstance(value, dict):
+        name = _safe_string(
+            _coalesce(
+                value.get("name"),
+                value.get("station_name"),
+                value.get("stationName"),
+                value.get("station"),
+                value.get("city"),
+            )
+        )
+        code = _safe_string(
+            _coalesce(
+                value.get("code"),
+                value.get("station_code"),
+                value.get("stationCode"),
+                value.get("short_code"),
+            )
+        )
+        return name, code.upper() if code else None
+
+    if isinstance(value, list):
+        resolved_name = None
+        resolved_code = None
+        for item in value:
+            item_name, item_code = _extract_station_value(item)
+            if not resolved_name and item_name:
+                resolved_name = item_name
+            if not resolved_code and item_code:
+                resolved_code = item_code
+            if resolved_name and resolved_code:
+                break
+        return resolved_name, resolved_code
+
+    text = _safe_string(value)
+    if not text:
+        return None, None
+
+    compact = text.strip()
+    if compact.isalpha() and compact.upper() == compact and 2 <= len(compact) <= 5:
+        return None, compact.upper()
+
+    code_match = re.search(r"\(([A-Za-z]{2,5})\)", compact)
+    code = code_match.group(1).upper() if code_match else None
+    name = re.sub(r"\([A-Za-z]{2,5}\)", " ", compact)
+    name = _safe_string(name)
+
+    if name and code and normalize_station_name(name) == normalize_station_name(code):
+        name = None
+
+    return name, code
+
+
+def _coalesce_station(*values: Any) -> tuple[Optional[str], Optional[str]]:
+    resolved_name = None
+    resolved_code = None
+
+    for value in values:
+        name, code = _extract_station_value(value)
+        if not resolved_name and name:
+            resolved_name = name
+        if not resolved_code and code:
+            resolved_code = code
+        if resolved_name and resolved_code:
+            break
+
+    return resolved_name, resolved_code
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -178,25 +251,31 @@ def _normalize_train(item: dict[str, Any], source: str, destination: str, travel
             item.get("trainName"),
         )
     )
-    source_name = _safe_string(
-        _coalesce(
-            item.get("source"),
-            item.get("from"),
-            item.get("from_station"),
-            item.get("source_station"),
-            item.get("sourceStation"),
-            item.get("src"),
-        )
+    source_name, source_code = _coalesce_station(
+        item.get("source"),
+        item.get("from"),
+        item.get("from_station"),
+        item.get("source_station"),
+        item.get("sourceStation"),
+        item.get("source_name"),
+        item.get("sourceName"),
+        item.get("src"),
+        item.get("source_code"),
+        item.get("sourceCode"),
+        item.get("src_code"),
     )
-    destination_name = _safe_string(
-        _coalesce(
-            item.get("destination"),
-            item.get("to"),
-            item.get("to_station"),
-            item.get("destination_station"),
-            item.get("destinationStation"),
-            item.get("dest"),
-        )
+    destination_name, destination_code = _coalesce_station(
+        item.get("destination"),
+        item.get("to"),
+        item.get("to_station"),
+        item.get("destination_station"),
+        item.get("destinationStation"),
+        item.get("destination_name"),
+        item.get("destinationName"),
+        item.get("dest"),
+        item.get("destination_code"),
+        item.get("destinationCode"),
+        item.get("dest_code"),
     )
 
     if not train_name and not train_number:
@@ -232,7 +311,9 @@ def _normalize_train(item: dict[str, Any], source: str, destination: str, travel
         "train_number": train_number,
         "train_name": train_name or f"Train {train_number or ''}".strip(),
         "source": source_name or source.title(),
+        "source_code": source_code,
         "destination": destination_name or destination.title(),
+        "destination_code": destination_code,
         "travel_date": _safe_date(
             _coalesce(
                 item.get("travel_date"),
@@ -290,31 +371,39 @@ def _filter_route_matches(results: list[dict[str, Any]], source: str, destinatio
     if not results:
         return []
 
-    source_candidates = resolve_station_candidates(source, [item["source"] for item in results], limit=8, minimum_score=0.5)
-    destination_candidates = resolve_station_candidates(
-        destination,
-        [item["destination"] for item in results],
-        limit=8,
-        minimum_score=0.5,
-    )
+    ranked: list[tuple[dict[str, Any], float, float]] = []
 
-    if not source_candidates or not destination_candidates:
-        return []
+    for item in results:
+        source_score = max(
+            station_match_score(source, item.get("source") or ""),
+            station_match_score(source, item.get("source_code") or ""),
+            station_match_score(
+                source,
+                f"{item.get('source') or ''} {item.get('source_code') or ''}".strip(),
+            ),
+        )
+        destination_score = max(
+            station_match_score(destination, item.get("destination") or ""),
+            station_match_score(destination, item.get("destination_code") or ""),
+            station_match_score(
+                destination,
+                f"{item.get('destination') or ''} {item.get('destination_code') or ''}".strip(),
+            ),
+        )
 
-    filtered = [
-        item
-        for item in results
-        if item["source"] in source_candidates and item["destination"] in destination_candidates
-    ]
+        if source_score < 0.5 or destination_score < 0.5:
+            continue
 
-    filtered.sort(
-        key=lambda item: (
-            -(station_match_score(source, item["source"]) + station_match_score(destination, item["destination"])),
-            item.get("departure_time") or "99:99",
-            item.get("train_name") or "",
+        ranked.append((item, source_score, destination_score))
+
+    ranked.sort(
+        key=lambda pair: (
+            -(pair[1] + pair[2]),
+            pair[0].get("departure_time") or "99:99",
+            pair[0].get("train_name") or "",
         )
     )
-    return filtered
+    return [item for item, _, _ in ranked]
 
 
 def _filter_train_name(results: list[dict[str, Any]], train_name: str) -> list[dict[str, Any]]:

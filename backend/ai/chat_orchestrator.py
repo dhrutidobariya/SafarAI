@@ -10,7 +10,7 @@ from models import Booking, ChatHistory
 from services.booking_service import create_booking, get_user_bookings, serialize_booking
 from services.payment_service import create_razorpay_order
 from services.train_service import TrainSearchError, find_best_train_match, search_trains as search_trains_from_api
-from services.station_matching import fuzzy_normalize_input, map_to_official_city
+from services.station_matching import clean_station_phrase, extract_station_mentions, fuzzy_normalize_input, map_to_official_city
 
 
 class BookingState(str, Enum):
@@ -70,6 +70,7 @@ class ChatOrchestrator:
             "travel_date": None,
             "seats": None,
             "seats_explicit": False,
+            "seat_preference": None,
         }
 
     def _pending_search(self, session: dict[str, Any]) -> dict[str, Any]:
@@ -126,27 +127,9 @@ class ChatOrchestrator:
 
     @staticmethod
     def _clean_route_part(value: str) -> str:
-        cleaned = value.strip(" ,.-")
-        # Rule: Entities MUST NOT contain these words
-        blacklist = [
-            "book", "ticket", "tickets", "available", "avilable", "avlbl", "avail", "avalaible",
-            "show", "train", "trains", "trian", "trai", "for", "from", "to", "please", 
-            "me", "find", "search", "the", "a", "an", "is", "any", "some", "details", "of"
-        ]
-        
-        # Remove common command prefixes (one or more)
-        prefix_pattern = r"^(?:(?:" + "|".join(blacklist) + r")\b\s*)+"
-        cleaned = re.sub(prefix_pattern, "", cleaned, flags=re.IGNORECASE)
-        
-        cleaned = re.sub(r"^\d+\s*(?:seat|seats|ticket|tickets)\b\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"^(?:from|to|train|trains)\b\s*", "", cleaned, flags=re.IGNORECASE)
-        
-        # Double check: if the remaining word is in blacklist, it's invalid
-        lowered = cleaned.lower()
-        if lowered in blacklist or not lowered:
+        cleaned = clean_station_phrase(value)
+        if not cleaned:
             return ""
-        
-        # City Normalization (official mapping)
         return map_to_official_city(cleaned)
 
     @staticmethod
@@ -380,6 +363,10 @@ class ChatOrchestrator:
             destination = self._clean_route_part(match.group(2))
             if source and destination and source.lower() != destination.lower():
                 return source.title(), destination.title()
+
+        mentions = extract_station_mentions(message, limit=2)
+        if len(mentions) == 2 and mentions[0].lower() != mentions[1].lower():
+            return mentions[0], mentions[1]
         return None
 
     def _extract_partial_route(self, message: str) -> tuple[Optional[str], Optional[str]]:
@@ -424,6 +411,33 @@ class ChatOrchestrator:
         if len(lowered.split()) > 3:
             return None
         return cleaned.title()
+
+    def _cancel_active_flow(self, session: dict[str, Any]) -> dict[str, Any]:
+        if session["state"] == BookingState.AWAITING_PAYMENT:
+            pending = self._latest_pending_booking_payload()
+            booking_id = session.get("confirmed_booking_id") or (pending or {}).get("booking_id")
+            if booking_id:
+                return self._handle_cancel_request(booking_id, session)
+            self._reset_session(session)
+            return self._assistant_response(session, "Payment cancelled. There is no pending booking to close.")
+
+        if session["state"] in {
+            BookingState.AWAITING_CONFIRMATION,
+            BookingState.AWAITING_SEAT_PREFERENCE,
+        }:
+            self._reset_session(session)
+            return self._assistant_response(session, "Booking cancelled. You can search for another train anytime.")
+
+        if session["state"] in {
+            BookingState.AWAITING_SEARCH_DETAILS,
+            BookingState.AWAITING_TRAIN_SELECTION,
+            BookingState.AWAITING_CONFLICT_RESOLUTION,
+        }:
+            self._reset_session(session)
+            return self._assistant_response(session, "Search cancelled. Tell me a new route whenever you're ready.")
+
+        self._reset_session(session)
+        return self._assistant_response(session, "Okay, I cancelled the current request.")
 
     def _update_pending_search_from_message(self, message: str, pending_search: dict[str, Any]) -> bool:
         # Rule 1 & 2: Latest message is source of truth. Reuse only if explicit.
@@ -473,6 +487,11 @@ class ChatOrchestrator:
         if new_seats is not None and pending_search.get("seats") != new_seats:
             pending_search["seats"] = new_seats
             pending_search["seats_explicit"] = True
+            updated = True
+            
+        new_preference = self._extract_seat_preference(message)
+        if new_preference and pending_search.get("seat_preference") != new_preference:
+            pending_search["seat_preference"] = new_preference
             updated = True
             
         return updated
@@ -550,15 +569,23 @@ class ChatOrchestrator:
             f"Seats: {booking['seats']}\n"
             f"Seat preference: {booking['seat_preference']}\n"
             f"Total Fare: {self._format_currency(booking['total_fare'])}\n\n"
-            "Reply YES to confirm booking, or tell me what you want to change."
+            "Reply YES to confirm booking."
         )
 
     def _build_seat_preference_prompt(self, booking: dict[str, Any]) -> str:
-        return (
-            f"You selected {booking['train_name']} for {booking['travel_date']}.\n"
-            f"What seat preference would you like for {booking['seats']} seat(s)? "
-            "Reply with Lower, Upper, Middle, Side Lower, Side Upper, or No Preference."
-        )
+        has_seats = bool(booking.get("seats"))
+        has_pref = bool(booking.get("seat_preference") and booking.get("seat_preference") != "No Preference")
+        
+        prefix = f"You selected {booking['train_name']} for {booking['travel_date']}.\n"
+        
+        if not has_seats and not has_pref:
+            return prefix + "How many seats do you need and what is your seat preference (e.g., Upper, Lower)?"
+        if not has_seats:
+            return prefix + "How many seats do you need for this journey?"
+        if not has_pref:
+            return prefix + f"What seat preference would you like for {booking['seats']} seat(s)? (Lower, Upper, Middle, Side Lower, Side Upper, or No Preference)"
+            
+        return prefix + "Please confirm your seat details."
 
     def _select_train_from_message(self, message: str, results: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
         if not results:
@@ -636,6 +663,7 @@ class ChatOrchestrator:
 
     def _booking_from_selected_train(self, selected_train: dict[str, Any], pending_search: dict[str, Any]) -> dict[str, Any]:
         seats = pending_search.get("seats") or 1
+        preference = pending_search.get("seat_preference") or "No Preference"
         return {
             "train_id": selected_train.get("train_id"),
             "train_number": selected_train.get("train_number"),
@@ -646,7 +674,7 @@ class ChatOrchestrator:
             "departure_time": selected_train["departure_time"],
             "arrival_time": selected_train["arrival_time"],
             "seats": seats,
-            "seat_preference": "No Preference",
+            "seat_preference": preference,
             "fare_per_seat": float(selected_train["fare_per_seat"]),
             "total_fare": round(float(selected_train["fare_per_seat"]) * seats, 2),
             "seats_available": int(selected_train.get("seats_available") or 0),
@@ -769,16 +797,11 @@ class ChatOrchestrator:
             )
 
         if self._is_negative(message):
-            session["state"] = BookingState.IDLE
-            return self._assistant_response(
-                session,
-                "Okay. Your booking is still pending, so you can type YES later to open payment.",
-                booking_id=session.get("confirmed_booking_id"),
-            )
+            return self._cancel_active_flow(session)
 
         return self._assistant_response(
             session,
-            "Reply YES to open Razorpay payment, or NO if you want to pay later.",
+            "Reply YES to open Razorpay payment, or NO to cancel this booking.",
             booking_id=session.get("confirmed_booking_id"),
         )
 
@@ -825,7 +848,7 @@ class ChatOrchestrator:
                 f"Booking ID: #{booking.id}\n"
                 f"Seats: {booking.seat_numbers}\n"
                 f"Total Fare: {self._format_currency(float(booking.total_fare))}\n"
-                "Reply YES to open Razorpay payment or NO to pay later."
+                "Reply YES to open Razorpay payment or NO to cancel this booking."
             )
             return self._assistant_response(session, response, booking_id=booking.id)
 
@@ -835,7 +858,7 @@ class ChatOrchestrator:
 
         return self._assistant_response(
             session,
-            "Reply YES to confirm the booking, or tell me what you want to change.",
+            "Reply YES to confirm the booking.",
         )
 
     def _handle_seat_preference_state(self, message: str, session: dict[str, Any]) -> dict[str, Any]:
@@ -876,9 +899,23 @@ class ChatOrchestrator:
             pending_booking = self._booking_from_selected_train(selected_train, pending_search)
             session["pending_booking"] = pending_booking
 
-            preference = self._extract_seat_preference(message)
-            if preference:
-                pending_booking["seat_preference"] = preference
+            # Check if we already have both seats and preference (from initial query or current message)
+            has_explicit_seats = bool(pending_search.get("seats_explicit"))
+            has_explicit_pref = bool(pending_search.get("seat_preference") and pending_search.get("seat_preference") != "No Preference")
+
+            # Update from current message if provided
+            current_pref = self._extract_seat_preference(message)
+            current_seats = self._extract_explicit_seat_count(message)
+            
+            if current_pref: 
+                pending_booking["seat_preference"] = current_pref
+                has_explicit_pref = True
+            if current_seats:
+                pending_booking["seats"] = current_seats
+                pending_booking["total_fare"] = round(pending_booking["fare_per_seat"] * current_seats, 2)
+                has_explicit_seats = True
+
+            if has_explicit_seats and has_explicit_pref:
                 session["state"] = BookingState.AWAITING_CONFIRMATION
                 return self._assistant_response(session, self._build_booking_summary(pending_booking))
 
@@ -928,8 +965,14 @@ class ChatOrchestrator:
         booking.status = "CANCELLED"
         self.db.add(booking)
         self.db.commit()
+        self.db.refresh(booking)
         self._reset_session(session)
-        return self._assistant_response(session, f"Booking #{booking_id} cancelled successfully.")
+        return self._assistant_response(
+            session,
+            f"Booking #{booking_id} cancelled successfully.",
+            booking_id=booking.id,
+            booking=serialize_booking(booking),
+        )
 
     def _handle_conflict_resolution(self, message: str, session: dict[str, Any]) -> dict[str, Any]:
         conflict = session.get("pending_conflict")
@@ -1005,6 +1048,8 @@ class ChatOrchestrator:
             cancel_match = re.search(r"cancel\s+(?:booking\s*)?#?(\d+)", message, re.IGNORECASE)
             if cancel_match:
                 return self._handle_cancel_request(int(cancel_match.group(1)), session)
+            if session["state"] != BookingState.IDLE:
+                return self._cancel_active_flow(session)
             return self._assistant_response(session, "Please provide the booking ID to cancel, e.g., 'cancel booking #123'.")
 
         # Contextual Handlers

@@ -3,15 +3,11 @@ import React, { createContext, useContext, useState } from "react";
 const ChatContext = createContext();
 
 export function ChatProvider({ children }) {
-  const [messages, setMessages] = useState([
-    { role: "assistant", text: "please share source,destination,date,seat." },
-  ]);
+  const [messages, setMessages] = useState([]);
   const [chatStarted, setChatStarted] = useState(false);
 
   const resetChat = () => {
-    setMessages([
-      { role: "assistant", text: "please share source,destination,date,seat." },
-    ]);
+    setMessages([]);
     setChatStarted(false);
   };
 

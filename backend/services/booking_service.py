@@ -217,6 +217,7 @@ def get_user_bookings(db: Session, user_id: int):
         db.query(Booking)
         .options(joinedload(Booking.payment), joinedload(Booking.user))
         .filter(Booking.user_id == user_id)
+        .filter(Booking.status.notin_(["PENDING", "CANCELLED"]))
         .order_by(Booking.created_at.desc())
         .all()
     )
