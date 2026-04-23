@@ -7,9 +7,9 @@ from routes.trains import router as trains_router
 
 __all__ = [
     "auth_router",
-    "chat_router",
     "trains_router",
     "booking_router",
+    "chat_router",
     "payment_router",
     "ticket_router",
 ]

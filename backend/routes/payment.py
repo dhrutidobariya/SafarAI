@@ -10,14 +10,16 @@ router = APIRouter(tags=["payment"])
 
 @router.post("/payment/order")
 def create_order(payload: PaymentRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return create_razorpay_order(db, payload.booking_id)
+    return create_razorpay_order(db, payload.booking_id, user.id)
 
 @router.post("/payment/verify")
 def verify_razorpay_payment(payload: RazorpayVerificationRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return verify_payment(
-        db, 
-        payload.booking_id, 
-        payload.razorpay_order_id, 
-        payload.razorpay_payment_id, 
-        payload.razorpay_signature
+        db,
+        payload.booking_id,
+        payload.provider,
+        payload.razorpay_order_id,
+        payload.razorpay_payment_id,
+        payload.razorpay_signature,
+        user.id,
     )

@@ -1,19 +1,19 @@
-# Railway Ticket Booking MCP System
+# Railway Ticket Booking Chatbot
 
-Full-stack chatbot railway ticket booking system with MCP-style tool calling.
+Full-stack railway ticket booking chatbot with live RapidAPI train search.
 
 ## Tech Stack
 - Frontend: React + Vite
 - Backend: FastAPI
 - Database: MySQL
-- AI: OpenAI API with MCP tool orchestration
+- Train Search: RapidAPI
 
 ## Backend Setup
 1. Create and seed database:
    - Open MySQL and run `database/schema.sql`
 2. Configure env:
    - Copy `backend/.env.example` to `backend/.env`
-   - Fill `DATABASE_URL`, `JWT_SECRET_KEY`, `OPENAI_API_KEY`
+   - Fill `DATABASE_URL`, `JWT_SECRET_KEY`, `RAPIDAPI_KEY`
 3. Install and run:
    - `cd backend`
    - `python -m venv .venv`
@@ -29,12 +29,13 @@ Full-stack chatbot railway ticket booking system with MCP-style tool calling.
 
 Frontend runs at `http://localhost:5173`, backend at `http://127.0.0.1:8000`.
 
-## MCP Tools Implemented
-- `search_trains(source, destination, travel_date)`
-- `check_availability(train_id, seats)`
-- `book_ticket(user_id, train_id, seats, travel_date)`
-- `process_payment(booking_id, amount)`
-- `generate_ticket(booking_id)`
+## API Endpoints
+- `POST /chat`
+- `GET /trains`
+- `POST /book`
+- `POST /payment/order`
+- `POST /payment/verify`
+- `GET /history`
 
 Flow:
-User Input -> LLM Parser -> MCP Tool Calls -> Backend Logic -> Tool Results -> Final Bot Reply
+User Input -> Chat State Manager -> RapidAPI Train Search -> Booking Snapshot -> Payment / Receipt

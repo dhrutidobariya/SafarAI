@@ -1,3 +1,3 @@
-from models.entities import Booking, ChatHistory, Payment, Train, User
+from models.entities import Booking, ChatHistory, Payment, User
 
-__all__ = ["User", "Train", "Booking", "Payment", "ChatHistory"]
+__all__ = ["User", "Booking", "Payment", "ChatHistory"]

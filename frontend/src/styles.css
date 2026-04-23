@@ -647,12 +647,113 @@ tr:hover {
   color: var(--text-color);
 }
 
+.message-actions button[aria-pressed='true'] {
+  background: var(--hover-color);
+  color: var(--accent-color);
+}
+
 .plus-btn {
   color: var(--sidebar-text-inactive);
 }
 
 .plus-btn:hover {
   color: var(--text-color);
+}
+
+.booking-card {
+  width: min(100%, 720px);
+  margin-top: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  background: var(--card-bg);
+  padding: 18px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.booking-card.confirmed {
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.booking-card.pending {
+  border-color: rgba(59, 130, 246, 0.28);
+}
+
+.booking-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.booking-card-subtitle {
+  color: var(--sidebar-text-inactive);
+  font-size: 0.9rem;
+  margin-top: 4px;
+}
+
+.booking-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.booking-state.success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #15803d;
+}
+
+.booking-state.awaiting {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+
+[data-theme='dark'] .booking-state.success {
+  color: #86efac;
+}
+
+[data-theme='dark'] .booking-state.awaiting {
+  color: #93c5fd;
+}
+
+.booking-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.booking-card-grid div {
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 12px 14px;
+}
+
+.booking-card-grid span {
+  display: block;
+  color: var(--sidebar-text-inactive);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+.booking-card-grid strong {
+  display: block;
+  font-size: 0.98rem;
+}
+
+.booking-card-meta {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--sidebar-text-inactive);
+  font-size: 0.92rem;
 }
 
 /* Profile Page Styles */
@@ -841,4 +942,50 @@ tr:hover {
 
 .secondary-btn:hover {
   background: var(--hover-color);
+}
+
+@media (max-width: 900px) {
+  .chat-layout {
+    flex-direction: column;
+    height: auto;
+  }
+
+  .sidebar {
+    width: 100%;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--sidebar-border);
+  }
+
+  .content {
+    height: auto;
+    min-height: calc(100vh - 180px);
+  }
+}
+
+@media (max-width: 640px) {
+  .top-header {
+    padding: 0 16px;
+  }
+
+  .messages-container {
+    padding: 24px 16px;
+  }
+
+  .input-area {
+    padding: 16px 12px 24px;
+  }
+
+  .chat-input-wrapper {
+    padding: 10px 14px;
+  }
+
+  .booking-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  th,
+  td {
+    padding: 12px;
+  }
 }

@@ -3,9 +3,10 @@ import mysql.connector
 from mysql.connector import pooling
 from dotenv import load_dotenv
 from contextlib import contextmanager
+from pathlib import Path
 
 # Load environment variables
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 # Database configuration from environment variables
 DB_HOST = os.getenv("DB_HOST", "localhost")

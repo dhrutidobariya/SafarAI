@@ -12,3 +12,5 @@ email-validator
 mcp
 mysql-connector-python
 requests
+razorpay
+rapidfuzz

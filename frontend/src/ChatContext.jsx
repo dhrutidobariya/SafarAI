@@ -4,13 +4,13 @@ const ChatContext = createContext();
 
 export function ChatProvider({ children }) {
   const [messages, setMessages] = useState([
-    { role: "assistant", text: "Welcome to SAFAR AI. Start booking your train tickets." },
+    { role: "assistant", text: "please share source,destination,date,seat." },
   ]);
   const [chatStarted, setChatStarted] = useState(false);
 
   const resetChat = () => {
     setMessages([
-      { role: "assistant", text: "Welcome to SAFAR AI. Start booking your train tickets." },
+      { role: "assistant", text: "please share source,destination,date,seat." },
     ]);
     setChatStarted(false);
   };

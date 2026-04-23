@@ -18,26 +18,18 @@ class User(Base):
     chats = relationship("ChatHistory", back_populates="user")
 
 
-class Train(Base):
-    __tablename__ = "trains"
-    id = Column(Integer, primary_key=True, index=True)
-    train_name = Column(String(100), nullable=False)
-    source = Column(String(60), nullable=False, index=True)
-    destination = Column(String(60), nullable=False, index=True)
-    travel_date = Column(Date, nullable=False, index=True)
-    departure_time = Column(String(20), nullable=False)
-    arrival_time = Column(String(20), nullable=False)
-    seats_available = Column(Integer, nullable=False)
-    fare_per_seat = Column(Float, nullable=False)
-
-    bookings = relationship("Booking", back_populates="train")
-
-
 class Booking(Base):
     __tablename__ = "bookings"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    train_id = Column(Integer, ForeignKey("trains.id"), nullable=False)
+    train_id = Column(Integer, nullable=True, index=True)
+    train_number = Column(String(50), nullable=True, index=True)
+    train_name = Column(String(100), nullable=False)
+    source = Column(String(60), nullable=False, index=True)
+    destination = Column(String(60), nullable=False, index=True)
+    departure_time = Column(String(20), nullable=True)
+    arrival_time = Column(String(20), nullable=True)
+    data_source = Column(String(20), nullable=True)
     seats = Column(Integer, nullable=False)
     seat_numbers = Column(String(255), nullable=True)
     seat_preference = Column(String(50), nullable=True)
@@ -47,7 +39,6 @@ class Booking(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="bookings")
-    train = relationship("Train", back_populates="bookings")
     payment = relationship("Payment", back_populates="booking", uselist=False)
 
 
