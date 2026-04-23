@@ -10,6 +10,7 @@ from models import Booking, ChatHistory
 from services.booking_service import create_booking, get_user_bookings, serialize_booking
 from services.payment_service import create_razorpay_order
 from services.train_service import TrainSearchError, find_best_train_match, search_trains as search_trains_from_api
+from services.station_matching import fuzzy_normalize_input, map_to_official_city
 
 
 class BookingState(str, Enum):
@@ -19,6 +20,21 @@ class BookingState(str, Enum):
     AWAITING_SEAT_PREFERENCE = "AWAITING_SEAT_PREFERENCE"
     AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
     AWAITING_PAYMENT = "AWAITING_PAYMENT"
+    AWAITING_CONFLICT_RESOLUTION = "AWAITING_CONFLICT_RESOLUTION"
+    PAID = "PAID"
+
+
+class Intent(str, Enum):
+    SEARCH_TRAINS = "SEARCH_TRAINS"
+    BOOK_TICKET = "BOOK_TICKET"
+    CHANGE_TRAIN = "CHANGE_TRAIN"
+    CONFIRM_BOOKING = "CONFIRM_BOOKING"
+    MAKE_PAYMENT = "MAKE_PAYMENT"
+    HISTORY = "HISTORY"
+    CANCEL = "CANCEL"
+    NEW_QUERY = "NEW_QUERY"
+    AFFIRMATIVE = "AFFIRMATIVE"
+    NEGATIVE = "NEGATIVE"
 
 
 SESSIONS: dict[int, dict[str, Any]] = {}
@@ -42,6 +58,7 @@ class ChatOrchestrator:
                 "pending_booking": None,
                 "confirmed_booking_id": None,
                 "confirmed_total_fare": None,
+                "pending_conflict": None,
             }
         return SESSIONS[self.user_id]
 
@@ -92,16 +109,45 @@ class ChatOrchestrator:
         return result
 
     @staticmethod
+    def _normalize_input(message: str) -> str:
+        # Step 1: Fuzzy correction (seta -> seat, etc.)
+        normalized = fuzzy_normalize_input(message)
+        
+        # Step 2: Remove filler words (but keep those that might be part of station names unless they are leading/trailing)
+        fillers = ["book", "ticket", "train", "available", "show", "please", "find", "for", "from", "to"]
+        for filler in fillers:
+            normalized = re.sub(rf"\b{filler}\b", "", normalized, flags=re.IGNORECASE)
+            
+        return normalized.strip()
+
+    @staticmethod
     def _format_currency(amount: float) -> str:
         return f"Rs.{amount:,.2f}"
 
     @staticmethod
     def _clean_route_part(value: str) -> str:
         cleaned = value.strip(" ,.-")
-        cleaned = re.sub(r"^(?:book|find|search|show|need|want|please|me)\s+", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"^\d+\s*(?:seat|seats|ticket|tickets)\s+", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"^(?:from|to)\s+", "", cleaned, flags=re.IGNORECASE)
-        return cleaned.strip(" ,.-")
+        # Rule: Entities MUST NOT contain these words
+        blacklist = [
+            "book", "ticket", "tickets", "available", "avilable", "avlbl", "avail", "avalaible",
+            "show", "train", "trains", "trian", "trai", "for", "from", "to", "please", 
+            "me", "find", "search", "the", "a", "an", "is", "any", "some", "details", "of"
+        ]
+        
+        # Remove common command prefixes (one or more)
+        prefix_pattern = r"^(?:(?:" + "|".join(blacklist) + r")\b\s*)+"
+        cleaned = re.sub(prefix_pattern, "", cleaned, flags=re.IGNORECASE)
+        
+        cleaned = re.sub(r"^\d+\s*(?:seat|seats|ticket|tickets)\b\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(?:from|to|train|trains)\b\s*", "", cleaned, flags=re.IGNORECASE)
+        
+        # Double check: if the remaining word is in blacklist, it's invalid
+        lowered = cleaned.lower()
+        if lowered in blacklist or not lowered:
+            return ""
+        
+        # City Normalization (official mapping)
+        return map_to_official_city(cleaned)
 
     @staticmethod
     def _is_affirmative(message: str) -> bool:
@@ -113,12 +159,25 @@ class ChatOrchestrator:
 
     @staticmethod
     def _extract_explicit_seat_count(message: str) -> Optional[int]:
-        match = re.search(
-            r"(\d+)\s*(?:seat|seats|ticket|tickets|passenger|passengers|person|persons)\b",
-            message,
-            re.IGNORECASE,
-        )
-        return int(match.group(1)) if match else None
+        # Normalization already happened (seta -> seat), but we search specifically for seat patterns
+        lowered = message.lower()
+        
+        # Pattern 1: NUMBER seat
+        match1 = re.search(r"(\d+)\s*seat\b", lowered)
+        if match1:
+            return int(match1.group(1))
+            
+        # Pattern 2: seat NUMBER
+        match2 = re.search(r"seat\s*(\d+)\b", lowered)
+        if match2:
+            return int(match2.group(1))
+            
+        # Pattern 3: Number near seat (within 10 chars)
+        match3 = re.search(r"(\d+).{0,10}seat|seat.{0,10}(\d+)", lowered)
+        if match3:
+            return int(match3.group(1) or match3.group(2))
+
+        return None
 
     @staticmethod
     def _extract_seat_preference(message: str) -> Optional[str]:
@@ -139,6 +198,79 @@ class ChatOrchestrator:
             return "Aisle"
         if "no preference" in lowered or "any seat" in lowered or "any berth" in lowered or "none" in lowered:
             return "No Preference"
+        return None
+
+    def _classify_intent(self, message: str, session: dict[str, Any]) -> Intent:
+        lowered = message.lower()
+        
+        # 1. CHANGE_TRAIN: change + train, or just train number/name if already SELECTED
+        if "change" in lowered and "train" in lowered:
+            return Intent.CHANGE_TRAIN
+        if session["state"] in [BookingState.AWAITING_TRAIN_SELECTION, BookingState.AWAITING_CONFIRMATION]:
+             # If message looks like a train number or name
+             if re.search(r"\b\d{5}\b", message) or any(kw in lowered for kw in ["express", "shatabdi", "rajdhani"]):
+                  return Intent.CHANGE_TRAIN
+
+        # 2. SEARCH_TRAINS: show/search/available + route (ensure not change)
+        if any(kw in lowered for kw in ["show", "search", "available", "train", "trains"]) and "book" not in lowered:
+             return Intent.SEARCH_TRAINS
+             
+        # 3. BOOK_TICKET: book + ticket/tickets
+        if "book" in lowered:
+             return Intent.BOOK_TICKET
+
+        # 4. CONFIRM_BOOKING: yes/confirm/proceed while AWAITING_CONFIRMATION
+        if self._is_affirmative(message) and session["state"] == BookingState.AWAITING_CONFIRMATION:
+             return Intent.CONFIRM_BOOKING
+
+        # 5. MAKE_PAYMENT: yes/pay/proceed while AWAITING_PAYMENT
+        if self._is_affirmative(message) and session["state"] == BookingState.AWAITING_PAYMENT:
+             return Intent.MAKE_PAYMENT
+
+        # 6. HISTORY/CANCEL
+        if any(kw in lowered for kw in ["history", "my booking", "my ticket"]):
+            return Intent.HISTORY
+        if "cancel" in lowered:
+            return Intent.CANCEL
+
+        # 7. Generic Affirmative/Negative
+        if self._is_affirmative(message):
+            return Intent.AFFIRMATIVE
+        if self._is_negative(message):
+            return Intent.NEGATIVE
+
+        # Default: SEARCH if it has a route, otherwise NEW_QUERY
+        if self._extract_route(message) or self._extract_partial_route(message)[0]:
+             return Intent.SEARCH_TRAINS
+             
+        return Intent.NEW_QUERY
+
+    @staticmethod
+    def _has_explicit_reference(message: str) -> bool:
+        """Checks if the user explicitly refers to the previous context."""
+        lowered = message.lower()
+        keywords = [
+            "same route", "this route", "that route", "previous route",
+            "same train", "this train", "that train", "previous train",
+            "as before", "as above", "as mentioned", "same station"
+        ]
+        return any(kw in lowered for kw in keywords)
+
+    def _detect_context_conflict(self, session: dict[str, Any], new_source: Optional[str], new_dest: Optional[str]) -> Optional[str]:
+        """Detects if partial new details conflict with existing session details."""
+        pending = session.get("pending_search") or {}
+        old_source = pending.get("source")
+        old_dest = pending.get("destination")
+        
+        if not old_source or not old_dest:
+            return None
+            
+        if new_source and new_source.lower() != old_source.lower() and not new_dest:
+            return f"Do you want to continue with {new_source} to {old_dest} or stay with {old_source} to {old_dest}?"
+        
+        if new_dest and new_dest.lower() != old_dest.lower() and not new_source:
+            return f"Do you want to continue from {old_source} to {new_dest} or stay with {old_source} to {old_dest}?"
+                
         return None
 
     @staticmethod
@@ -229,12 +361,12 @@ class ChatOrchestrator:
         patterns = [
             (
                 r"from\s+([a-z][a-z\s]{1,40}?)\s+to\s+([a-z][a-z\s]{1,40}?)"
-                r"(?=\s+(?:on|for|tomorrow|today|next|this|with|upper|lower|middle|"
+                r"(?=\s+(?:\d+|seat|on|for|tomorrow|today|next|this|with|upper|lower|middle|"
                 r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|[?.!,]|$)"
             ),
             (
                 r"([a-z][a-z\s]{1,40}?)\s+to\s+([a-z][a-z\s]{1,40}?)"
-                r"(?=\s+(?:on|for|tomorrow|today|next|this|with|upper|lower|middle|"
+                r"(?=\s+(?:\d+|seat|on|for|tomorrow|today|next|this|with|upper|lower|middle|"
                 r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|[?.!,]|$)"
             ),
         ]
@@ -254,12 +386,12 @@ class ChatOrchestrator:
         patterns = {
             "source": (
                 r"from\s+([a-z][a-z\s]{1,40}?)"
-                r"(?=\s+(?:to|on|for|tomorrow|today|next|this|with|"
+                r"(?=\s+(?:to|on|for|tomorrow|today|next|this|with|\d+|seat|"
                 r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|[?.!,]|$)"
             ),
             "destination": (
                 r"to\s+([a-z][a-z\s]{1,40}?)"
-                r"(?=\s+(?:on|for|tomorrow|today|next|this|with|"
+                r"(?=\s+(?:on|for|tomorrow|today|next|this|with|\d+|seat|"
                 r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|[?.!,]|$)"
             ),
         }
@@ -294,53 +426,55 @@ class ChatOrchestrator:
         return cleaned.title()
 
     def _update_pending_search_from_message(self, message: str, pending_search: dict[str, Any]) -> bool:
-        updated = False
-
+        # Rule 1 & 2: Latest message is source of truth. Reuse only if explicit.
+        has_ref = self._has_explicit_reference(message)
+        
         route = self._extract_route(message)
-        if route:
-            source, destination = route
-            if pending_search.get("source") != source:
-                pending_search["source"] = source
-                updated = True
-            if pending_search.get("destination") != destination:
-                pending_search["destination"] = destination
-                updated = True
-        else:
-            source, destination = self._extract_partial_route(message)
-            if source and pending_search.get("source") != source:
-                pending_search["source"] = source
-                updated = True
-            if destination and pending_search.get("destination") != destination:
-                pending_search["destination"] = destination
-                updated = True
+        new_source, new_dest = route if route else self._extract_partial_route(message)
+        new_date = self._extract_explicit_travel_date(message)
+        new_seats = self._extract_explicit_seat_count(message)
+        
+        # Rule 3: Each new query must override all previous journey details.
+        if (new_source or new_dest) and not has_ref:
+            if new_source and new_dest:
+                pending_search["source"] = new_source
+                pending_search["destination"] = new_dest
+                pending_search["travel_date"] = new_date.isoformat() if new_date else None
+                pending_search["seats"] = new_seats
+                pending_search["seats_explicit"] = new_seats is not None
+                return True
+            
+            if new_source: pending_search["source"] = new_source
+            if new_dest: pending_search["destination"] = new_dest
+            if new_date: pending_search["travel_date"] = new_date.isoformat()
+            if new_seats is not None: 
+                pending_search["seats"] = new_seats
+                pending_search["seats_explicit"] = True
+            return True
 
-            guessed_station = self._guess_station_name(message)
-            if guessed_station:
-                if not pending_search.get("source"):
-                    pending_search["source"] = guessed_station
-                    updated = True
-                elif not pending_search.get("destination"):
-                    pending_search["destination"] = guessed_station
-                    updated = True
-
-        travel_date = self._extract_explicit_travel_date(message)
-        if travel_date:
-            iso_value = travel_date.isoformat()
+        updated = False
+        if new_source and pending_search.get("source") != new_source:
+            pending_search["source"] = new_source
+            updated = True
+        if new_dest and pending_search.get("destination") != new_dest:
+            pending_search["destination"] = new_dest
+            updated = True
+        if new_date:
+            iso_value = new_date.isoformat()
             if pending_search.get("travel_date") != iso_value:
                 pending_search["travel_date"] = iso_value
                 updated = True
-
-        seats = self._extract_explicit_seat_count(message)
-        if seats is None:
+        
+        if new_seats is None:
             exact_number = re.fullmatch(r"\s*(\d+)\s*", message)
-            if exact_number and not route and not travel_date:
-                seats = int(exact_number.group(1))
+            if exact_number and not route and not new_date:
+                new_seats = int(exact_number.group(1))
 
-        if seats is not None and pending_search.get("seats") != seats:
-            pending_search["seats"] = seats
+        if new_seats is not None and pending_search.get("seats") != new_seats:
+            pending_search["seats"] = new_seats
             pending_search["seats_explicit"] = True
             updated = True
-
+            
         return updated
 
     @staticmethod
@@ -406,14 +540,16 @@ class ChatOrchestrator:
     def _build_booking_summary(self, booking: dict[str, Any]) -> str:
         train_ref = booking.get("train_number") or booking.get("train_id") or "N/A"
         return (
-            "Please confirm your booking details:\n"
+            "### JOURNEY DETAILS ###\n"
+            f"Source: {booking['source']}\n"
+            f"Destination: {booking['destination']}\n"
             f"Train: {booking['train_name']} ({train_ref})\n"
-            f"Route: {booking['source']} -> {booking['destination']}\n"
             f"Date: {booking['travel_date']}\n"
+            "------------------------\n"
             f"Departure: {booking['departure_time']} | Arrival: {booking['arrival_time']}\n"
             f"Seats: {booking['seats']}\n"
             f"Seat preference: {booking['seat_preference']}\n"
-            f"Total Fare: {self._format_currency(booking['total_fare'])}\n"
+            f"Total Fare: {self._format_currency(booking['total_fare'])}\n\n"
             "Reply YES to confirm booking, or tell me what you want to change."
         )
 
@@ -544,6 +680,16 @@ class ChatOrchestrator:
         return changed, None
 
     def _handle_search_input(self, message: str, session: dict[str, Any]) -> dict[str, Any]:
+        # Fail-Safe Conflict Detection
+        if not self._has_explicit_reference(message):
+            route = self._extract_route(message)
+            new_source, new_dest = route if route else self._extract_partial_route(message)
+            conflict_msg = self._detect_context_conflict(session, new_source, new_dest)
+            if conflict_msg:
+                session["state"] = BookingState.AWAITING_CONFLICT_RESOLUTION
+                session["pending_conflict"] = {"source": new_source, "destination": new_dest}
+                return self._assistant_response(session, conflict_msg)
+
         pending_search = self._pending_search(session)
         self._update_pending_search_from_message(message, pending_search)
         self._clear_search_context(session, keep_pending_search=True)
@@ -785,17 +931,85 @@ class ChatOrchestrator:
         self._reset_session(session)
         return self._assistant_response(session, f"Booking #{booking_id} cancelled successfully.")
 
+    def _handle_conflict_resolution(self, message: str, session: dict[str, Any]) -> dict[str, Any]:
+        conflict = session.get("pending_conflict")
+        if not conflict:
+            session["state"] = BookingState.IDLE
+            return self._handle_search_input(message, session)
+            
+        if self._is_affirmative(message):
+            # User wants the new route
+            pending_search = self._pending_search(session)
+            if conflict.get("source"): pending_search["source"] = conflict["source"]
+            if conflict.get("destination"): pending_search["destination"] = conflict["destination"]
+            session["state"] = BookingState.IDLE 
+            session["pending_conflict"] = None
+            return self._handle_search_input(message, session)
+            
+        if self._is_negative(message):
+            # User wants to stay with previous route
+            session["state"] = BookingState.IDLE
+            session["pending_conflict"] = None
+            return self._assistant_response(session, "Okay, continuing with your previous route. What would you like to do next?")
+            
+        return self._assistant_response(session, "Please reply with YES to use the new route or NO to keep the previous one.")
+
+    @classmethod
+    def clear_session(cls, user_id: int) -> None:
+        if user_id in SESSIONS:
+            del SESSIONS[user_id]
+
     def handle_message(self, user_message: str) -> dict[str, Any]:
-        message = (user_message or "").strip()
-        if not message:
+        raw_message = (user_message or "").strip()
+        if not raw_message:
             return {
                 "reply": "I didn't receive any message. How can I help you?",
                 "tool_calls": [],
                 "timestamp": datetime.utcnow().isoformat(),
             }
 
+        # Step 1: Input Normalization (lowercase + fuzzy corrections like seta -> seat)
+        message = fuzzy_normalize_input(raw_message)
+        
         session = self._session()
         self._save_chat("user", message)
+        
+        # 1. Classify Intent
+        intent = self._classify_intent(message, session)
+        
+        # 2. State Transition Rules
+        
+        # Rule: SEARCH_TRAINS ALWAYS RESET
+        if intent == Intent.SEARCH_TRAINS:
+            self._reset_session(session)
+            return self._handle_search_input(message, session)
+
+        # Rule: AFTER PAYMENT (IDLE but status was PAID) -> Handled by route reset,
+        # but if we are here, we check if state is PAID
+        if session["state"] == BookingState.PAID:
+             self._reset_session(session)
+             # Next message is treated as a new query
+             return self.handle_message(message)
+
+        # Rule: CHANGE_TRAIN must overwrite train_number
+        if intent == Intent.CHANGE_TRAIN:
+             # If we are in selection or confirmation, we update selection
+             return self._handle_train_selection_state(message, session)
+
+        # 3. Execution based on State + Intent
+        
+        if intent == Intent.HISTORY:
+            return self._handle_history(session)
+            
+        if intent == Intent.CANCEL:
+            cancel_match = re.search(r"cancel\s+(?:booking\s*)?#?(\d+)", message, re.IGNORECASE)
+            if cancel_match:
+                return self._handle_cancel_request(int(cancel_match.group(1)), session)
+            return self._assistant_response(session, "Please provide the booking ID to cancel, e.g., 'cancel booking #123'.")
+
+        # Contextual Handlers
+        if session["state"] == BookingState.AWAITING_CONFLICT_RESOLUTION:
+            return self._handle_conflict_resolution(message, session)
 
         if session["state"] == BookingState.AWAITING_PAYMENT:
             return self._handle_payment_state(message, session)
@@ -809,38 +1023,20 @@ class ChatOrchestrator:
         if session["state"] == BookingState.AWAITING_TRAIN_SELECTION:
             return self._handle_train_selection_state(message, session)
 
-        lowered = message.lower()
-        if "history" in lowered or "my booking" in lowered or "my ticket" in lowered:
-            return self._handle_history(session)
+        if intent == Intent.BOOK_TICKET:
+             # Try to process as search/book input
+             return self._handle_search_input(message, session)
 
-        cancel_match = re.search(r"cancel\s+(?:booking\s*)?#?(\d+)", message, re.IGNORECASE)
-        if cancel_match:
-            return self._handle_cancel_request(int(cancel_match.group(1)), session)
-
-        if self._should_handle_search_input(message, session):
-            return self._handle_search_input(message, session)
-
-        if self._is_affirmative(message):
-            pending = self._latest_pending_booking_payload()
-            if pending:
-                session["state"] = BookingState.AWAITING_PAYMENT
-                session["confirmed_booking_id"] = pending["booking_id"]
-                session["confirmed_total_fare"] = pending["total_fare"]
-                return self._assistant_response(
-                    session,
-                    (
-                        f"Pending booking found: #{pending['booking_id']} with fare "
-                        f"{self._format_currency(pending['total_fare'])}.\n"
-                        "Reply YES again to open Razorpay payment."
-                    ),
-                    booking_id=pending["booking_id"],
-                )
-
-        if any(word in lowered for word in ["hi", "hello", "hey", "help", "start"]):
+        # Default fallback
+        if any(word in message.lower() for word in ["hi", "hello", "hey", "help", "start"]):
             return self._assistant_response(
                 session,
                 "please share source,destination,date,seat."
             )
+
+        # If it looks like search details but not explicit intent
+        if self._should_handle_search_input(message, session):
+            return self._handle_search_input(message, session)
 
         return self._assistant_response(
             session,

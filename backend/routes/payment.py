@@ -5,6 +5,7 @@ from models import User
 from schemas import PaymentRequest, RazorpayVerificationRequest
 from services.auth_service import get_current_user
 from services.payment_service import create_razorpay_order, verify_payment
+from ai.chat_orchestrator import ChatOrchestrator
 
 router = APIRouter(tags=["payment"])
 
@@ -14,7 +15,7 @@ def create_order(payload: PaymentRequest, db: Session = Depends(get_db), user: U
 
 @router.post("/payment/verify")
 def verify_razorpay_payment(payload: RazorpayVerificationRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return verify_payment(
+    result = verify_payment(
         db,
         payload.booking_id,
         payload.provider,
@@ -23,3 +24,9 @@ def verify_razorpay_payment(payload: RazorpayVerificationRequest, db: Session = 
         payload.razorpay_signature,
         user.id,
     )
+    
+    # Rule: AFTER PAYMENT (successful) -> FULL RESET ALL state
+    # We clear the chat session context so the next message is a fresh start
+    ChatOrchestrator.clear_session(user.id)
+    
+    return result

@@ -5,21 +5,38 @@ from rapidfuzz import fuzz
 
 _ALIASES = {
     "ahmedabad": ["ahmedabad", "adi"],
-    "bangalore": ["bengaluru", "bangalore", "sbc"],
-    "bengaluru": ["bengaluru", "bangalore", "sbc"],
-    "bombay": ["mumbai", "mumbai central", "mumbai csmt"],
-    "calcutta": ["kolkata", "howrah"],
-    "chennai": ["chennai", "chennai central", "mas"],
-    "delhi": ["delhi", "new delhi", "old delhi", "ndls"],
-    "delh": ["delhi", "new delhi"],
-    "delhu": ["delhi", "new delhi"],
-    "madras": ["chennai", "chennai central"],
-    "mumbai": ["mumbai", "mumbai central", "mumbai csmt", "bombay"],
-    "mubai": ["mumbai", "mumbai central"],
-    "mumabi": ["mumbai", "mumbai central"],
-    "new delhi": ["new delhi", "delhi", "ndls"],
-    "surat": ["surat", "st"],
+    "bengaluru": ["bengaluru", "bangalore", "sbc", "beglaru", "bengluru", "banglore"],
+    "kolkata": ["kolkata", "howrah", "calcutta"],
+    "chennai": ["chennai", "chennai central", "mas", "madras"],
+    "new delhi": ["new delhi", "delhi", "ndls", "delh", "delhu", "deli", "ndls", "old delhi"],
+    "mumbai": ["mumbai", "mumbai central", "mumbai csmt", "bombay", "mumabi", "mubai", "mumbai central"],
+    "surat": ["surat", "st", "surt"],
+    "nagpur": ["nagpur", "nagpore"],
 }
+
+_FUZZY_WORDS = {
+    "seat": ["seta", "seet", "siet", "sit", "seats", "sheet"],
+    "train": ["trian", "trai", "tarin", "trains"],
+    "available": ["avilable", "avlbl", "avail", "avalaible", "availabel"],
+}
+
+def fuzzy_normalize_input(text: str) -> str:
+    lowered = (text or "").lower()
+    # Normalize seat words
+    for official, variants in _FUZZY_WORDS.items():
+        for variant in variants:
+            lowered = re.sub(rf"\b{variant}\b", official, lowered)
+    return lowered
+
+def map_to_official_city(name: str) -> str:
+    normalized = normalize_station_name(name)
+    if not normalized:
+        return name
+    
+    for official, aliases in _ALIASES.items():
+        if normalized in aliases:
+            return official.title()
+    return name.title()
 
 
 def normalize_station_name(value: str) -> str:
